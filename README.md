@@ -74,9 +74,37 @@ data-validate validate \
 
 - LLM-powered validation (optional GoCode):
 ```bash
+# Row count comparison between two tables
 data-validate llm-validate "compare row counts between tables" \
   -t "ecomm_mart.fact_bill_line,enterprise_linked.fact_bill_line"
+
+# PK integrity using a composite key
+data-validate llm-validate "validate primary key uniqueness using bill_id and bill_line_num columns" \
+  -t "ecomm_mart.fact_bill_line,enterprise_linked.fact_bill_line" -k "bill_id,bill_line_num"
+
+# Single-table profiling (no prod table)
+data-validate llm-validate "profile this table" -t "ecomm_mart.fact_bill_line"
+
+# SCD2: null checks on current records only
+data-validate llm-validate "null checks on current records only (where is_current = 'Y')" \
+  -t "ecomm_core_conformed_local.dim_subscription_product"
+
+# Mismatch detection with LEFT JOIN and date filtering
+data-validate llm-validate \
+  "bill mismatch detection: enterprise.dim_new_acquisition_shopper vs enterprise_linked.dim_new_acquisition_shopper, \
+   date filter: 2025-07-19 to 2025-07-24, \
+   join condition: bill_shopper_id matches but new_acquisition_bill_id differs, \
+   output: COUNT of total mismatches, query type: single LEFT JOIN query"
+
+# Bi-directional missing records (UNION of LEFT JOINs)
+data-validate llm-validate \
+  "find missing records in both directions between enterprise.dim_new_acquisition_shopper and enterprise_linked.dim_new_acquisition_shopper, \
+   date filter: 2025-07-19 to 2025-07-24, join condition: bill_shopper_id matches, \
+   output: show all missing records with source indicator, query type: UNION of LEFT JOINs"
 ```
+Tips:
+- You can omit `-t`/`-k` and let the tool auto-extract tables, keys, and dates from your prompt.
+- GoCode requires VPN and a valid `GOCODE_API_TOKEN` in `.env`.
 
 - Output formats:
 ```bash
