@@ -31,7 +31,7 @@ Create a `.env` (or run the setup command below):
 AWS_REGION=us-west-2
 ATHENA_OUTPUT_LOCATION=s3://your-athena-results-bucket/
 
-# Optional: GoCode (for LLM-powered SQL)
+# Optional: GoCode (for LLM-powered SQL): https://godaddy-corp.atlassian.net/wiki/spaces/BI/pages/3843663583/GoCode+alpha+-+GoCode+Generated+Keys+Your+Favorite+CLI+Tools how to get gocode api
 GOCODE_API_TOKEN=sk-...
 GOCAAS_MODEL=claude-3-7-sonnet-20250219
 GOCAAS_BASE_URL=https://caas-gocode-prod.caas-prod.prod.onkatana.net
@@ -101,19 +101,6 @@ data-validate llm-validate \
   "find missing records in both directions between enterprise.dim_new_acquisition_shopper and enterprise_linked.dim_new_acquisition_shopper, \
    date filter: 2025-07-19 to 2025-07-24, join condition: bill_shopper_id matches, \
    output: show all missing records with source indicator, query type: UNION of LEFT JOINs"
-```
-Tips:
-- You can omit `-t`/`-k` and let the tool auto-extract tables, keys, and dates from your prompt.
-- GoCode requires VPN and a valid `GOCODE_API_TOKEN` in `.env`.
-
-- Output formats:
-```bash
-# table (default)
-data-validate validate -l table1 -p table2 -o table
-# json
-data-validate validate -l table1 -p table2 -o json
-# csv
-data-validate validate -l table1 -p table2 -o csv
 ```
 
 ## Programmatic Usage (Python)
