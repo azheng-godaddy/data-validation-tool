@@ -10,7 +10,7 @@ from tabulate import tabulate
 import json
 import re
 
-from config import validate_config
+from config import validate_config, settings
 from data_validator import DataValidator, ValidationReport
 from validation_rules import ValidationStatus, ValidationResult, DataTypeValidation
 from datetime import datetime
@@ -34,7 +34,8 @@ def cli():
 @cli.command('setup-env')
 @click.option('--gocode-token', '-t', default='', help='GoCode API token (optional)')
 @click.option('--github-token', '-g', default='', help='GitHub token for enhanced schema lookup (optional)')
-def setup_env(gocode_token: str, github_token: str):
+@click.option('--athena-output', '-a', default='', help='Athena S3 output location (e.g., s3://bucket/prefix/)')
+def setup_env(gocode_token: str, github_token: str, athena_output: str):
     """Create .env configuration file automatically."""
     import os
     
@@ -64,11 +65,13 @@ def setup_env(gocode_token: str, github_token: str):
     
     # Fixed configuration for your environment
     region = 'us-west-2'
-    s3_location = 's3://aws-athena-query-results-255575434142-us-west-2/'
+    default_s3 = 's3://aws-athena-query-results-255575434142-us-west-2/'  # ckpectlbacth dev default
+    s3_location = athena_output.strip() if athena_output.strip() else click.prompt(
+        'Athena S3 output location', default=default_s3, show_default=True
+    )
     
     # Athena Notebooks configuration (always used for both regular and Iceberg tables)
-    console.print("\n[bold]Athena Notebooks Configuration:[/bold]")
-    console.print("Using Athena Notebooks for all data validation (supports both regular and Iceberg tables)")
+    # (Notebook-specific configuration removed)
     
     # Create .env content
     env_content = f"""# AWS Configuration
@@ -125,10 +128,7 @@ ENABLE_GITHUB_SCHEMA=false
         console.print(f"[blue]Region:[/blue] {region}")
         console.print(f"[blue]S3 Location:[/blue] {s3_location}")
         
-        if use_notebooks:
-            console.print("[green]✅ Athena Notebooks enabled (Iceberg support)[/green]")
-        else:
-            console.print("[blue]📊 Regular Athena enabled[/blue]")
+        console.print("[blue]📊 Athena direct API enabled[/blue]")
         
         if gocode_token.strip():
             masked_token = f"{'*' * (len(gocode_token) - 8) + gocode_token[-8:]}" if len(gocode_token) > 8 else "***"
@@ -154,7 +154,7 @@ ENABLE_GITHUB_SCHEMA=false
         console.print("2. Test your setup:")
         console.print("   [dim]python3 setup_aws.py check-credentials[/dim]")
         console.print("3. Start validating:")
-        console.print("   [dim]python3 cli.py prompt \"validate tables...\"[/dim]")
+        console.print("   [dim]data-validate validate -l <db.table> -p <db.table> -k <pk>[,pk2][/dim]")
         
     except Exception as e:
         console.print(f"[red]❌ Error creating .env file: {e}[/red]")
@@ -168,10 +168,11 @@ ENABLE_GITHUB_SCHEMA=false
 @click.option('--date-column', '-d', help='Date column for filtering (e.g., bill_modified_mst_date)')
 @click.option('--start-date', '-s', help='Start date (YYYY-MM-DD)')
 @click.option('--end-date', '-e', help='End date (YYYY-MM-DD)')
+@click.option('--athena-output', '-a', help='Override Athena S3 output location for this run (e.g., s3://bucket/prefix/)')
 @click.option('--output-format', '-o', type=click.Choice(['table', 'json', 'csv']), 
               default='table', help='Output format')
 def validate(legacy_table: str, prod_table: str, primary_key: str, date_column: str, 
-             start_date: str, end_date: str, output_format: str):
+             start_date: str, end_date: str, athena_output: str, output_format: str):
     """
     Predefined data validation.
     - Two-table mode: provide -l and -p to compare legacy vs prod
@@ -185,6 +186,13 @@ def validate(legacy_table: str, prod_table: str, primary_key: str, date_column: 
     python3 cli.py validate -l ecomm_mart.fact_bill_line -k bill_id,bill_line_num
     """
     console.print("🎯 [bold blue]Predefined Data Validation[/bold blue]")
+    
+    # Optional per-run override of Athena output location
+    if athena_output and athena_output.strip():
+        settings.athena_output_location = athena_output.strip()
+        console.print(f"📁 Override output location: [green]{settings.athena_output_location}[/green]")
+    else:
+        console.print(f"📁 Output location: [blue]{settings.athena_output_location}[/blue]")
     
     # Parse primary key(s) - handle comma-separated composite keys
     primary_key_list = None
@@ -357,240 +365,6 @@ def validate(legacy_table: str, prod_table: str, primary_key: str, date_column: 
         raise click.Abort()
 
 
-@cli.command('validate-single')
-@click.option('--table', '-t', required=True, help='Table name (e.g., ecomm_mart.fact_bill_line)')
-@click.option('--primary-key', '-k', help='Primary key column name(s) - comma-separated for composite keys (optional)')
-@click.option('--date-column', '-d', help='Date column for filtering (e.g., bill_modified_mst_date)')
-@click.option('--start-date', '-s', help='Start date (YYYY-MM-DD)')
-@click.option('--end-date', '-e', help='End date (YYYY-MM-DD)')
-@click.option('--output-format', '-o', type=click.Choice(['table', 'json', 'csv']),
-              default='table', help='Output format')
-def validate_single(table: str, primary_key: str, date_column: str, start_date: str, end_date: str, output_format: str):
-    """Predefined single-table validation (profiling-style checks without LLM)."""
-    console.print("🧪 [bold blue]Predefined Single-Table Validation[/bold blue]")
-    
-    # Parse primary key(s)
-    primary_key_list: Optional[List[str]] = None
-    if primary_key and primary_key.strip():
-        primary_key_list = [pk.strip() for pk in primary_key.split(',') if pk.strip()]
-        pk_display = ', '.join(primary_key_list) + (" (composite key)" if len(primary_key_list) > 1 else "")
-    else:
-        pk_display = 'Not specified (PK uniqueness check skipped)'
-    
-    console.print("\n🔍 [bold]Validation Plan:[/bold]")
-    console.print(f"  📊 Table: [blue]{table}[/blue]")
-    console.print(f"  🔑 Primary Key: [blue]{pk_display}[/blue]")
-    console.print(f"  📅 Date Column: [blue]{date_column or 'Not specified'}[/blue]")
-    if start_date or end_date:
-        console.print(f"  📅 Date Range: [blue]{start_date or 'beginning'} to {end_date or 'end'}[/blue]")
-    else:
-        console.print(f"  📅 Date Range: [blue]All data[/blue]")
-    
-    if not validate_config():
-        console.print("❌ Configuration validation failed. Please set up your .env file first.")
-        return
-    
-    validator = DataValidator()
-    results: List[ValidationResult] = []
-    start_ts = datetime.now()
-    
-    # Build optional WHERE conditions
-    where_clauses: List[str] = []
-    if date_column and (start_date or end_date):
-        # Reuse DataValidator's date filter builder
-        date_filter = validator._build_date_filter(date_column, start_date, end_date)
-        if date_filter:
-            where_clauses.append(date_filter)
-    
-    where_sql = (" WHERE " + " AND ".join(where_clauses)) if where_clauses else ""
-    
-    try:
-        # Row count
-        row_sql = f"SELECT COUNT(*) as row_count FROM {table}{where_sql}"
-        row_res = validator.athena_client.execute_query(row_sql)
-        row_count = row_res[0]['row_count'] if row_res else 0
-        results.append(ValidationResult(
-            rule_name="Row Count (Single Table)",
-            status=ValidationStatus.INFO,
-            legacy_value=row_count,
-            prod_value=None,
-            message=f"Row count: {row_count:,}"
-        ))
-        
-        # PK uniqueness (optional)
-        if primary_key_list:
-            if len(primary_key_list) == 1:
-                pk_col = primary_key_list[0]
-                pk_where = [f"{pk_col} IS NOT NULL"] + where_clauses
-                pk_where_sql = (" WHERE " + " AND ".join(pk_where)) if pk_where else ""
-                pk_sql = f"SELECT COUNT(*) as total_rows, COUNT(DISTINCT {pk_col}) as distinct_pk_count FROM {table}{pk_where_sql}"
-            else:
-                concat_expr = "CONCAT(" + ", '|', ".join([f"CAST({col} AS VARCHAR)" for col in primary_key_list]) + ")"
-                not_nulls = [f"{col} IS NOT NULL" for col in primary_key_list]
-                pk_where = not_nulls + where_clauses
-                pk_where_sql = (" WHERE " + " AND ".join(pk_where)) if pk_where else ""
-                pk_sql = f"SELECT COUNT(*) as total_rows, COUNT(DISTINCT {concat_expr}) as distinct_pk_count FROM {table}{pk_where_sql}"
-            
-            pk_res = validator.athena_client.execute_query(pk_sql)
-            total_rows = pk_res[0]['total_rows'] if pk_res else 0
-            distinct_pk = pk_res[0]['distinct_pk_count'] if pk_res else 0
-            unique_pct = (distinct_pk / max(total_rows, 1)) * 100
-            pk_status = ValidationStatus.PASS if unique_pct == 100 else ValidationStatus.FAIL
-            pk_message = f"PK uniqueness: {unique_pct:.2f}% ({distinct_pk:,}/{total_rows:,} unique)"
-            results.append(ValidationResult(
-                rule_name="Primary Key Uniqueness (Single Table)",
-                status=pk_status,
-                legacy_value={"total": total_rows, "unique": distinct_pk, "unique_pct": unique_pct},
-                prod_value=None,
-                message=pk_message
-            ))
-        
-        # Schema summary via Glue (INFO)
-        dt_rule = DataTypeValidation()
-        schema_result = dt_rule.validate_tables_direct(table, table)
-        schema_result.rule_name = "Schema Summary (Glue Catalog)"
-        results.append(schema_result)
-        
-        # Build report-like object for consistent display
-        exec_time = (datetime.now() - start_ts).total_seconds()
-        report = ValidationReport(
-            legacy_table=table,
-            prod_table=table,
-            validation_results=results,
-            execution_time=exec_time,
-            timestamp=datetime.now(),
-            summary="; ".join([r.message for r in results if r.message]),
-            total_checks=len(results),
-            passed_checks=len([r for r in results if r.status == ValidationStatus.PASS]),
-            failed_checks=len([r for r in results if r.status == ValidationStatus.FAIL]),
-            error_checks=len([r for r in results if r.status == ValidationStatus.ERROR])
-        )
-        
-        _display_results(report, output_format)
-        console.print(f"\n✅ [bold green]Single-table validation completed successfully![/bold green]")
-        console.print(f"📊 Executed {report.total_checks} checks in {report.execution_time:.2f}s")
-    except Exception as e:
-        console.print(f"❌ [bold red]Single-table validation failed:[/bold red] {str(e)}")
-        raise click.Abort()
-
-
-@cli.command()
-@click.option('--legacy-table', '-l', required=True, help='Legacy table name')
-@click.option('--prod-table', '-p', required=True, help='Production table name')
-@click.option('--legacy-sql', required=True, help='SQL query for legacy table')
-@click.option('--prod-sql', required=True, help='SQL query for production table')
-@click.option('--validation-name', '-n', default='Custom SQL Validation', help='Name for this validation')
-def custom_sql(
-    legacy_table: str,
-    prod_table: str,
-    legacy_sql: str,
-    prod_sql: str,
-    validation_name: str
-):
-    """Run validation with custom SQL queries."""
-    
-    console.print(f"[bold blue]🔍 Custom SQL Validation[/bold blue]")
-    console.print(f"Validation: [yellow]{validation_name}[/yellow]")
-    
-    validator = DataValidator()
-    
-    try:
-        with console.status("[bold green]Executing custom SQL..."):
-            result = validator.validate_with_custom_sql(
-                legacy_table=legacy_table,
-                prod_table=prod_table,
-                legacy_sql=legacy_sql,
-                prod_sql=prod_sql,
-                validation_name=validation_name
-            )
-        
-        # Display single result
-        display_single_result(result)
-        
-    except Exception as e:
-        console.print(f"[red]❌ Custom SQL validation failed: {str(e)}[/red]")
-        raise click.Abort()
-
-
-@cli.command('notebook-session')
-@click.option('-l', '--legacy-table', required=True, help='Legacy table name (can be Iceberg)')
-@click.option('-p', '--prod-table', required=True, help='Production table name')
-@click.option('-k', '--primary-key', help='Primary key column name')
-@click.option('--workgroup', default='de-ckpetlbatch-spark-common', help='Spark workgroup for Iceberg support')
-@click.option('--generate-notebook', is_flag=True, help='Generate notebook content for manual execution')
-def notebook_session(legacy_table, prod_table, primary_key, workgroup, generate_notebook):
-    """Create notebook session for Iceberg table validation."""
-    from notebook_session_client import NotebookSessionClient
-    from config import Settings
-    from rich.panel import Panel
-    from rich.syntax import Syntax
-    
-    console.print("🧊 [bold cyan]Iceberg Table Notebook Session[/bold cyan]")
-    
-    # Configure for Spark workgroup
-    settings = Settings(
-        athena_workgroup=workgroup,
-        athena_notebook_instance='data-validation_notebook'
-    )
-    
-    client = NotebookSessionClient(settings)
-    
-    console.print(f"📋 Legacy Table: [yellow]{legacy_table}[/yellow]")
-    console.print(f"📋 Production Table: [yellow]{prod_table}[/yellow]")
-    console.print(f"📍 Workgroup: [yellow]{workgroup}[/yellow]")
-    
-    if generate_notebook:
-        console.print("\n🚀 Generating validation notebook...")
-        
-        # Generate notebook content
-        notebook_content = client.generate_validation_notebook(
-            legacy_table=legacy_table,
-            prod_table=prod_table,
-            primary_key=primary_key
-        )
-        
-        # Save notebook to file
-        notebook_file = f"validation_notebook_{legacy_table.replace('.', '_')}_{prod_table.replace('.', '_')}.md"
-        with open(notebook_file, 'w') as f:
-            f.write(notebook_content)
-        
-        console.print(f"✅ Notebook saved to: [green]{notebook_file}[/green]")
-        
-        # Show setup instructions
-        compatibility = client.test_notebook_compatibility()
-        instructions = compatibility['setup_instructions']
-        
-        setup_text = f"""1. Open AWS Athena Console: {instructions['console_access']}
-2. Navigate to Notebooks
-3. Select workgroup: [bold]{instructions['workgroup_selection']}[/bold]
-4. Create or open notebook: [bold]data-validation_notebook[/bold]
-5. Configure Spark properties:
-   {chr(10).join('   - ' + prop for prop in instructions['required_spark_properties'])}
-6. Open the generated notebook file: [bold]{notebook_file}[/bold]
-7. Copy and paste the content into your Athena notebook
-8. Execute each cell step by step"""
-        
-        console.print(Panel(setup_text, title="📋 Setup Instructions", border_style="green"))
-        
-    else:
-        # Test Iceberg table access
-        console.print("\n🧪 Testing Iceberg table access...")
-        
-        table_info = client.get_iceberg_table_info(legacy_table)
-        if 'error' not in table_info:
-            console.print("✅ Iceberg table info generated")
-            console.print(f"Available queries: {list(table_info['queries'].keys())}")
-            
-            # Show sample query
-            sample_query = table_info['queries']['sample_data']
-            syntax = Syntax(f"%%sql\n{sample_query}", "sql", theme="monokai", line_numbers=True)
-            console.print(Panel(syntax, title="📝 Sample Query for Notebook"))
-        else:
-            console.print(f"❌ Error: {table_info['error']}")
-    
-    console.print("✅ [bold green]Notebook session setup completed![/bold green]")
-
-
 
 
 def _extract_tables_and_dates_from_prompt(prompt: str) -> dict:
@@ -670,10 +444,11 @@ def _extract_tables_and_dates_from_prompt(prompt: str) -> dict:
 @click.option('--start-date', '-s', help='Start date (optional - will auto-extract from prompt)')
 @click.option('--end-date', '-e', help='End date (optional - will auto-extract from prompt)')
 @click.option('--primary-key', '-k', help='Primary key column(s) for context (optional)')
+@click.option('--athena-output', '-a', help='Override Athena S3 output location for this run (e.g., s3://bucket/prefix/)')
 @click.option('--output-format', '-o', type=click.Choice(['table', 'json', 'csv']), 
               default='table', help='Output format')
 def llm_validate(validation_request: str, tables: str, date_column: str, start_date: str, 
-                end_date: str, primary_key: str, output_format: str):
+                end_date: str, primary_key: str, athena_output: str, output_format: str):
     """
     🤖 LLM-powered data validation using natural language.
     
@@ -694,6 +469,13 @@ def llm_validate(validation_request: str, tables: str, date_column: str, start_d
     🔧 MANUAL PARAMETERS (Traditional way):
     python3 cli.py llm-validate "compare row counts" -t "table1,table2" -s "2025-01-01" -e "2025-01-31"
     """
+    
+    # Optional per-run override of Athena output location
+    if athena_output and athena_output.strip():
+        settings.athena_output_location = athena_output.strip()
+        console.print(f"📁 Override output location: [green]{settings.athena_output_location}[/green]")
+    else:
+        console.print(f"📁 Output location: [blue]{settings.athena_output_location}[/blue]")
     
     console.print("🤖 [bold blue]LLM-Powered Data Validation[/bold blue]")
     console.print(f"📝 Request: [yellow]{validation_request}[/yellow]")
@@ -1282,141 +1064,6 @@ def _generate_fallback_sql(validation_request: str, legacy_table: str, prod_tabl
             'prod_sql': f"SELECT COUNT(*) as row_count FROM {prod_table}{date_filter}" if prod_table else f"SELECT COUNT(*) as row_count FROM {legacy_table}{date_filter}",
             'explanation': 'Basic row count comparison'
         }
-
-
-@cli.command('cache-stats')
-def cache_stats():
-    """Show SQL cache statistics and performance metrics."""
-    try:
-        from llm_sql_generator import SQLGenerator
-        from sql_cache_manager import SQLCacheManager
-        from config import settings
-        
-        console.print("\n[bold blue]🗄️  SQL Cache Statistics[/bold blue]")
-        
-        # Initialize cache manager to get stats
-        if getattr(settings, 'enable_sql_cache', True):
-            cache_manager = SQLCacheManager(
-                cache_dir=getattr(settings, 'sql_cache_dir', '.sql_cache'),
-                ttl_hours=getattr(settings, 'sql_cache_ttl_hours', 24),
-                max_entries=getattr(settings, 'sql_cache_max_entries', 1000)
-            )
-            
-            stats = cache_manager.get_cache_stats()
-            
-            # Create statistics table
-            stats_table = Table(title="Cache Performance")
-            stats_table.add_column("Metric", style="cyan")
-            stats_table.add_column("Value", style="green")
-            
-            stats_table.add_row("Cache Entries", str(stats["entries_count"]))
-            stats_table.add_row("Max Entries", str(stats["max_entries"]))
-            stats_table.add_row("TTL Hours", str(stats["ttl_hours"]))
-            stats_table.add_row("Cache Hits", str(stats["cache_hits"]))
-            stats_table.add_row("Cache Misses", str(stats["cache_misses"]))
-            stats_table.add_row("Hit Rate", f"{stats['hit_rate_percent']}%")
-            stats_table.add_row("Total Saves", str(stats["saves"]))
-            stats_table.add_row("Evictions", str(stats["evictions"]))
-            stats_table.add_row("Cache Size", f"{stats['cache_size_mb']} MB")
-            stats_table.add_row("Last Cleanup", stats["last_cleanup"])
-            
-            console.print(stats_table)
-            
-            # Show recent cache entries
-            recent_entries = cache_manager.list_cache_entries(limit=5)
-            if recent_entries:
-                console.print("\n[bold cyan]Recent Cache Entries:[/bold cyan]")
-                entries_table = Table()
-                entries_table.add_column("Validation Request", style="yellow", max_width=60)
-                entries_table.add_column("Tables", style="blue")
-                entries_table.add_column("Age (hrs)", style="green")
-                entries_table.add_column("Access Count", style="magenta")
-                
-                for entry in recent_entries:
-                    entries_table.add_row(
-                        entry["validation_request"],
-                        entry["tables"],
-                        str(entry["age_hours"]),
-                        str(entry["access_count"])
-                    )
-                
-                console.print(entries_table)
-        else:
-            console.print("[yellow]⚠️  SQL caching is disabled in configuration[/yellow]")
-            
-    except Exception as e:
-        console.print(f"[red]❌ Failed to get cache stats: {str(e)}[/red]")
-
-
-@cli.command('cache-clear')
-@click.option('--confirm', '-c', is_flag=True, help='Skip confirmation prompt')
-def cache_clear(confirm: bool):
-    """Clear all cached SQL queries."""
-    try:
-        from sql_cache_manager import SQLCacheManager
-        from config import settings
-        
-        if not confirm:
-            if not click.confirm("Are you sure you want to clear all cached SQL queries?"):
-                console.print("[yellow]Cache clear cancelled.[/yellow]")
-                return
-        
-        if getattr(settings, 'enable_sql_cache', True):
-            cache_manager = SQLCacheManager(
-                cache_dir=getattr(settings, 'sql_cache_dir', '.sql_cache'),
-                ttl_hours=getattr(settings, 'sql_cache_ttl_hours', 24),
-                max_entries=getattr(settings, 'sql_cache_max_entries', 1000)
-            )
-            
-            cleared_count = cache_manager.clear_cache()
-            console.print(f"[green]✅ Cleared {cleared_count} cache entries[/green]")
-        else:
-            console.print("[yellow]⚠️  SQL caching is disabled in configuration[/yellow]")
-            
-    except Exception as e:
-        console.print(f"[red]❌ Failed to clear cache: {str(e)}[/red]")
-
-
-@cli.command('cache-config')
-def cache_config():
-    """Show current cache configuration."""
-    try:
-        from config import settings
-        
-        console.print("\n[bold blue]🗄️  SQL Cache Configuration[/bold blue]")
-        
-        config_table = Table(title="Cache Settings")
-        config_table.add_column("Setting", style="cyan")
-        config_table.add_column("Value", style="green")
-        config_table.add_column("Description", style="dim")
-        
-        config_table.add_row(
-            "enable_sql_cache",
-            str(getattr(settings, 'enable_sql_cache', True)),
-            "Enable/disable SQL caching"
-        )
-        config_table.add_row(
-            "sql_cache_dir", 
-            getattr(settings, 'sql_cache_dir', '.sql_cache'),
-            "Directory for cache files"
-        )
-        config_table.add_row(
-            "sql_cache_ttl_hours",
-            str(getattr(settings, 'sql_cache_ttl_hours', 24)),
-            "Cache entry time-to-live in hours"
-        )
-        config_table.add_row(
-            "sql_cache_max_entries",
-            str(getattr(settings, 'sql_cache_max_entries', 1000)),
-            "Maximum number of cache entries"
-        )
-        
-        console.print(config_table)
-        
-        console.print("\n[dim]💡 These settings can be configured in your .env file[/dim]")
-        
-    except Exception as e:
-        console.print(f"[red]❌ Failed to show cache config: {str(e)}[/red]")
 
 
 if __name__ == '__main__':

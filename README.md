@@ -4,12 +4,28 @@ A data validation tool for AWS Athena that supports two workflows:
 - Single-table profiling (row count, PK uniqueness, schema summary)
 - Migration comparison (legacy → prod: row count, PK, schema/type)
 
-No Jupyter required — optimized for use in Cursor and the command line.
+**Documentation**: [AI-Powered Data Validation Framework](https://godaddy-corp.atlassian.net/wiki/spaces/~azheng/pages/3869468704/AI-Powered+Data+Validation+Framework)
+
+## Get the code locally
+
+- Download ZIP: [Download repository ZIP](https://github.com/azheng-godaddy/data-validation-tool/archive/refs/heads/main.zip) and unzip it
+- Or clone the repo:
+```bash
+git clone https://github.com/azheng-godaddy/data-validation-tool.git
+```
+Then:
+```bash
+cd data-validation-tool
+```
 
 ## Install (library + CLI)
 
 ```bash
-# From repo root
+# Recommended: create and activate a virtual environment (macOS/Linux)
+python3 -m venv .venv
+source .venv/bin/activate
+
+# From repo root, install the tool into the venv
 pip install .
 
 # Or build a wheel to share
@@ -23,30 +39,34 @@ CLI entrypoint after install:
 data-validate --help
 ```
 
-## Configuration
+## Run setup
 
-Create a `.env` (or run the setup command below):
-```bash
-# AWS
-AWS_REGION=us-west-2
-ATHENA_OUTPUT_LOCATION=s3://your-athena-results-bucket/
-
-# Optional: GoCode (for LLM-powered SQL): https://godaddy-corp.atlassian.net/wiki/spaces/BI/pages/3843663583/GoCode+alpha+-+GoCode+Generated+Keys+Your+Favorite+CLI+Tools how to get gocode api
-GOCODE_API_TOKEN=sk-...
-GOCAAS_MODEL=claude-3-7-sonnet-20250219
-GOCAAS_BASE_URL=https://caas-gocode-prod.caas-prod.prod.onkatana.net
-
-# Optional: GitHub Schema repo enhancement
-GITHUB_TOKEN=your_token
-GITHUB_REPO_OWNER=gdcorp-dna
-GITHUB_REPO_NAME=lake
-GITHUB_BRANCH=main
-ENABLE_GITHUB_SCHEMA=false
-```
-
-Quick setup helper:
+Create `.env` interactively (recommended):
 ```bash
 data-validate setup-env
+```
+- Prompts for GoCode token and GitHub token
+- Prompts for Athena S3 output location. Press Enter to use default:
+  - **ATHENA_OUTPUT_LOCATION=s3://aws-athena-query-results-255575434142-us-west-2/**
+
+Non-interactive (CI-friendly):
+```bash
+data-validate setup-env \
+  -a s3://my-athena-results-bucket/prefix/ \
+  -t sk-... \
+  -g ghp_...
+```
+
+Note: You can override `ATHENA_OUTPUT_LOCATION` per run using `-a` on `validate` or `llm-validate` if needed.
+
+## SSO authentication (required)
+
+```bash
+pip install aws-okta-processor
+# Authenticate (replace 'username' with your SSO username)
+eval $(aws-okta-processor authenticate -e -o godaddy.okta.com -u username)
+# Verify credentials
+python3 setup_aws.py check-credentials
 ```
 
 ## Quick Start (CLI)
@@ -62,6 +82,10 @@ data-validate validate \
   -l ecomm_mart.fact_bill_line \
   -k bill_id,bill_line_num \
   -d bill_modified_mst_date -s 2025-07-19 -e 2025-07-24
+
+# Optional: override S3 output for this run
+data-validate validate -l ecomm_mart.fact_bill_line -k bill_id,bill_line_num \
+  -a s3://my-athena-results/your-prefix/
 ```
 
 - Migration comparison (legacy → prod):
@@ -72,7 +96,7 @@ data-validate validate \
   -k bill_id,bill_line_num
 ```
 
-- LLM-powered validation (optional GoCode):
+- LLM-powered validation (GoCode):
 ```bash
 # Row count comparison between two tables
 data-validate llm-validate "compare row counts between tables" \
@@ -101,6 +125,10 @@ data-validate llm-validate \
   "find missing records in both directions between enterprise.dim_new_acquisition_shopper and enterprise_linked.dim_new_acquisition_shopper, \
    date filter: 2025-07-19 to 2025-07-24, join condition: bill_shopper_id matches, \
    output: show all missing records with source indicator, query type: UNION of LEFT JOINs"
+
+# Optional: per-run S3 override for LLM mode
+data-validate llm-validate "compare row counts" -t "db1.t1,db2.t2" \
+  -a s3://org-athena-results-123456789012/region/
 ```
 
 ## Programmatic Usage (Python)
