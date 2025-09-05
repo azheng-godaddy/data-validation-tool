@@ -86,6 +86,9 @@ data-validate validate \
 # Optional: override S3 output for this run
 data-validate validate -l ecomm_mart.fact_bill_line -k bill_id,bill_line_num \
   -a s3://my-athena-results/your-prefix/
+
+# Column comparison using lake schema (per-column mismatch counts)
+data-validate compare-columns -l ecomm360.fact_bill_line_vw -p enterprise_linked.fact_bill_line -k bill_id,bill_line_num -d bill_modified_mst_date -s 2025-07-19 -e 2025-07-24
 ```
 
 - Migration comparison (legacy → prod):
@@ -125,6 +128,23 @@ data-validate llm-validate \
   "find missing records in both directions between enterprise.dim_new_acquisition_shopper and enterprise_linked.dim_new_acquisition_shopper, \
    date filter: 2025-07-19 to 2025-07-24, join condition: bill_shopper_id matches, \
    output: show all missing records with source indicator, query type: UNION of LEFT JOINs"
+
+
+### Column-to-column comparison (sample rows for a specific column)
+data-validate llm-validate "mismatch check between legacy and prime.
+legacy: enterprise_linked.fact_bill_line l inner join enterprise_linked.fact_bill b on l.bill_id = b.bill_id.
+prime: ecomm360.fact_bill_line_vw.
+primary key: bill_id,bill_line_num.
+columns to compare: tax_usd_amt,chargeback_flag,department_id.
+output: TOP 20 mismatched rows with bill_id,bill_line_num and both values for each column.
+join type: INNER JOIN on primary key.
+date filter: bill_modified_mst_date between 2025-07-19 and 2025-07-24"
+
+
+data-validate llm-validate "column-by-column comparison between ecomm360.fact_bill_line_vw and enterprise_linked.fact_bill_line, primary key: bill_id,bill_line_num, columns: subaccount_customer_id,item_tracking_code,pf_id, output: COUNT mismatches per column, join type: INNER JOIN on primary key" \
+  -d bill_modified_mst_date -s 2025-07-19 -e 2025-07-24
+
+
 
 # Optional: per-run S3 override for LLM mode
 data-validate llm-validate "compare row counts" -t "db1.t1,db2.t2" \

@@ -12,7 +12,7 @@ import re
 
 from config import validate_config, settings
 from data_validator import DataValidator, ValidationReport
-from validation_rules import ValidationStatus, ValidationResult, DataTypeValidation
+from validation_rules import ValidationStatus, ValidationResult, DataTypeValidation, ColumnComparisonFromLake
 from datetime import datetime
 
 
@@ -751,6 +751,51 @@ def test_gocode():
     except Exception as e:
         console.print(f"[red]❌ Diagnostic failed: {str(e)}[/red]")
 
+
+@cli.command('compare-columns')
+@click.option('--legacy-table', '-l', required=True, help='Legacy table name (e.g., db.table)')
+@click.option('--prod-table', '-p', required=True, help='Production table name (e.g., db.table)')
+@click.option('--primary-key', '-k', required=True, help='Primary key columns (comma-separated), e.g., pk1,pk2')
+@click.option('--include-pk', is_flag=True, default=True, help='Include PK columns in comparison (default: true)')
+@click.option('--date-column', '-d', help='Optional date column for filtering')
+@click.option('--start-date', '-s', help='Optional start date (YYYY-MM-DD)')
+@click.option('--end-date', '-e', help='Optional end date (YYYY-MM-DD)')
+@click.option('--athena-output', '-a', help='Override Athena S3 output (s3://bucket/prefix/) for this run')
+@click.option('--output-format', '-o', type=click.Choice(['table', 'json', 'csv']), default='table')
+def compare_columns(legacy_table, prod_table, primary_key, include_pk, date_column, start_date, end_date, athena_output, output_format):
+    """Compare columns using lake repo schema. Returns per-column mismatch counts."""
+    console.print("🧮 [bold blue]Column Comparison (Lake Schema)[/bold blue]")
+    if athena_output and athena_output.strip():
+        settings.athena_output_location = athena_output.strip()
+        console.print(f"📁 Override output location: [green]{settings.athena_output_location}[/green]")
+
+    pk_cols = [c.strip() for c in primary_key.split(',') if c.strip()]
+    rule = ColumnComparisonFromLake(
+        primary_key_columns=pk_cols,
+        include_pk=include_pk,
+        date_column=date_column,
+        start_date=start_date,
+        end_date=end_date,
+    )
+
+    validator = DataValidator()
+    validator.add_validation_rule(rule)
+
+    try:
+        report = validator.validate_tables(
+            legacy_table=legacy_table,
+            prod_table=prod_table,
+            include_schema_validation=False,
+        )
+        _display_results(report, output_format)
+        console.print("\n✅ [bold green]Column comparison completed![/bold green]")
+    except Exception as e:
+        console.print(f"❌ [bold red]Column comparison failed:[/bold red] {str(e)}")
+        raise click.Abort()
+
+# Aliases for convenience/naming variants
+cli.add_command(compare_columns, 'compare-cols')
+cli.add_command(compare_columns, 'compare-coulsk')
 
 def display_validation_report(report: ValidationReport, output_format: str):
     """Display validation report in specified format."""

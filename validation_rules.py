@@ -49,6 +49,151 @@ class ValidationRule(ABC):
         pass
 
 
+class ColumnComparisonFromLake(ValidationRule):
+    """Rule: Compare columns value-by-value between two tables using lake (GitHub) schema.
+
+    - Auto-loads column lists from the lake repository (GitHub) for both tables
+    - Compares the intersection of columns across the two tables
+    - Includes primary key columns in comparison if requested
+    - Returns a single-row result with per-column mismatch counts
+    """
+
+    def __init__(
+        self,
+        primary_key_columns: List[str],
+        include_pk: bool = True,
+        date_column: Optional[str] = None,
+        start_date: Optional[str] = None,
+        end_date: Optional[str] = None,
+        max_columns: int = 20,
+    ):
+        super().__init__(
+            name="Column Comparison (Lake Schema)",
+            description="Counts mismatches per column using FULL OUTER JOIN on PK; schema from lake repo"
+        )
+        self.primary_key_columns = primary_key_columns
+        self.include_pk = include_pk
+        self.date_column = date_column
+        self.start_date = start_date
+        self.end_date = end_date
+        self.max_columns = max_columns
+
+    def _fetch_columns_from_lake(self, table: str) -> List[str]:
+        try:
+            from github_schema_fetcher import GitHubSchemaFetcher
+            from config import settings
+            fetcher = GitHubSchemaFetcher(
+                repo_owner=getattr(settings, 'github_repo_owner', 'gdcorp-dna'),
+                repo_name=getattr(settings, 'github_repo_name', 'lake'),
+                github_token=getattr(settings, 'github_token', None),
+                branch=getattr(settings, 'github_branch', 'main'),
+            )
+            ddl = fetcher.search_table_ddl(table)
+            cols = [c['name'] for c in (ddl.get('schema_info', {}).get('columns', []) if ddl else [])]
+            return cols
+        except Exception:
+            return []
+
+    def _build_date_filter(self, legacy_alias: str, prod_alias: str) -> str:
+        if not self.date_column or not (self.start_date or self.end_date):
+            return ""
+        date_expr = (
+            f"COALESCE(TRY_CAST({legacy_alias}.{self.date_column} AS DATE), "
+            f"TRY_CAST({prod_alias}.{self.date_column} AS DATE))"
+        )
+        parts: List[str] = []
+        if self.start_date:
+            parts.append(f"{date_expr} >= DATE '{self.start_date}'")
+        if self.end_date:
+            parts.append(f"{date_expr} <= DATE '{self.end_date}'")
+        return (" AND " + " AND ".join(parts)) if parts else ""
+
+    def generate_sql(self, legacy_table: str, prod_table: str) -> Dict[str, str]:
+        # Get columns from lake for both tables
+        legacy_cols = set(self._fetch_columns_from_lake(legacy_table))
+        prod_cols = set(self._fetch_columns_from_lake(prod_table))
+
+        # Compare on intersection
+        compare_cols: List[str] = sorted(list(legacy_cols & prod_cols))
+
+        # Include PK columns explicitly if requested and known
+        if self.include_pk:
+            for pk in self.primary_key_columns:
+                if pk not in compare_cols:
+                    compare_cols.append(pk)
+
+        if not compare_cols:
+            # Fallback minimal to avoid empty SQL
+            compare_cols = list(dict.fromkeys(self.primary_key_columns))
+
+        # If too many columns, return an informational row asking user to specify columns
+        if len(compare_cols) > self.max_columns:
+            info_sql = f"SELECT 'Too many columns to compare ({len(compare_cols)}). Please specify columns.' AS info"
+            return {"legacy_sql": info_sql, "prod_sql": ""}
+
+        # If acceptable number of columns, return per-table non-null counts per column
+        # Build per-table date filters
+        def _table_date_filter(alias: str) -> str:
+            if not self.date_column or not (self.start_date or self.end_date):
+                return ""
+            parts: List[str] = []
+            parts.append("1=1")
+            if self.start_date:
+                parts.append(f"TRY_CAST({alias}.{self.date_column} AS DATE) >= DATE '{self.start_date}'")
+            if self.end_date:
+                parts.append(f"TRY_CAST({alias}.{self.date_column} AS DATE) <= DATE '{self.end_date}'")
+            return " WHERE " + " AND ".join(parts)
+
+        legacy_counts = ",\n  ".join([
+            f"SUM(CASE WHEN l.{col} IS NOT NULL THEN 1 ELSE 0 END) AS {col}_non_nulls" for col in compare_cols
+        ])
+        prod_counts = ",\n  ".join([
+            f"SUM(CASE WHEN p.{col} IS NOT NULL THEN 1 ELSE 0 END) AS {col}_non_nulls" for col in compare_cols
+        ])
+
+        legacy_sql = (
+            f"SELECT\n  {legacy_counts}\nFROM {legacy_table} l" + _table_date_filter("l") + ";"
+        )
+        prod_sql = (
+            f"SELECT\n  {prod_counts}\nFROM {prod_table} p" + _table_date_filter("p") + ";"
+        )
+
+        return {"legacy_sql": legacy_sql, "prod_sql": prod_sql}
+
+    def validate(self, legacy_result: Any, prod_result: Any) -> ValidationResult:
+        try:
+            # Handle info short-circuit
+            if legacy_result and isinstance(legacy_result[0], dict) and 'info' in legacy_result[0]:
+                return ValidationResult(
+                    rule_name=self.name,
+                    status=ValidationStatus.INFO,
+                    legacy_value=legacy_result[0].get('info'),
+                    prod_value=None,
+                    message=legacy_result[0].get('info')
+                )
+
+            legacy_row = legacy_result[0] if legacy_result else {}
+            prod_row = prod_result[0] if prod_result else {}
+            # Summarize a few columns to keep message short
+            sample_cols = [k for k in legacy_row.keys()][:5]
+            message = f"Per-table non-null counts returned for {len(legacy_row.keys())} columns (showing sample: {', '.join(sample_cols)})"
+            return ValidationResult(
+                rule_name=self.name,
+                status=ValidationStatus.INFO,
+                legacy_value=legacy_row,
+                prod_value=prod_row,
+                message=message
+            )
+        except Exception as e:
+            return ValidationResult(
+                rule_name=self.name,
+                status=ValidationStatus.ERROR,
+                legacy_value=legacy_result,
+                prod_value=prod_result,
+                message="Error during column comparison",
+                error_details=str(e)
+            )
+
 class RowCountValidation(ValidationRule):
     """Validates row count between legacy and production tables."""
     

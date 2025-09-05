@@ -182,7 +182,7 @@ class SQLGenerator:
         for endpoint in endpoints:
             try:
                 print(f"Trying GoCaaS endpoint: {endpoint}")
-                response = requests.post(endpoint, headers=self.headers, json=payload, timeout=30)
+                response = requests.post(endpoint, headers=self.headers, json=payload, timeout=60)
                 
                 if response.status_code == 200:
                     result = response.json()
@@ -282,6 +282,47 @@ class SQLGenerator:
                 date_filter_context += f"\n- From Date: {start_date}"
             elif end_date:
                 date_filter_context += f"\n- Until Date: {end_date}"
+
+        # Type-aware hint: infer date_column type from provided schema (legacy first, then prod)
+        date_type_hint = ""
+        inferred_type = None
+        try:
+            if date_column and table_schema and isinstance(table_schema, dict):
+                def _extract_type(schema_list: Optional[List[Dict]]) -> Optional[str]:
+                    if not schema_list:
+                        return None
+                    for col in schema_list:
+                        # Handle various key shapes
+                        col_name = col.get('name') or col.get('column_name') or col.get('Name')
+                        if col_name and str(col_name).lower() == date_column.lower():
+                            return (col.get('type') or col.get('data_type') or col.get('Type') or '').lower()
+                    return None
+
+                legacy_cols = table_schema.get(legacy_table)
+                prod_cols = table_schema.get(prod_table)
+                inferred_type = _extract_type(legacy_cols) or _extract_type(prod_cols)
+
+                if inferred_type:
+                    date_type_hint = f"\nType Hints:\n- {date_column} type: {inferred_type}. Use type-appropriate filtering: "
+                    if any(t in inferred_type for t in ["varchar", "string", "char"]):
+                        date_type_hint += (
+                            "compare as VARCHAR (lexicographic) between 'YYYY-MM-DD' strings; do NOT CAST to DATE."
+                        )
+                    elif any(t in inferred_type for t in ["timestamp", "date"]):
+                        date_type_hint += (
+                            "use DATE/TIMESTAMP literals or CAST as needed (e.g., DATE 'YYYY-MM-DD')."
+                        )
+                    elif any(t in inferred_type for t in ["bigint", "int", "integer"]):
+                        date_type_hint += (
+                            "treat as epoch if appropriate; convert using from_unixtime/cast for comparisons."
+                        )
+                    else:
+                        date_type_hint += (
+                            "choose the safest comparison for the detected type without unnecessary casts."
+                        )
+        except Exception:
+            # Non-fatal; proceed without type hint
+            pass
         
         # Determine if we need a unified query for both tables
         has_two_tables = prod_table and prod_table.strip() and prod_table != legacy_table
@@ -309,6 +350,7 @@ COMPARISON SCENARIO - TWO TABLES:
 - Prod Table: {prod_table}
 {schema_context}
 {date_filter_context}
+{date_type_hint}
 
 REQUIREMENTS:
 1. Generate ONE query that compares/validates BOTH tables
@@ -344,6 +386,7 @@ Generate SIMPLE, COMPLETE Athena SQL for: {validation_request}
 TABLE: {legacy_table}
 {schema_context}
 {date_filter_context}
+{date_type_hint}
 
 REQUIREMENTS:
 1. Keep it SIMPLE - basic SELECT statements only
@@ -375,7 +418,7 @@ JSON Response:
                     {"role": "system", "content": system_msg},
                     {"role": "user", "content": prompt}
                 ],
-                max_tokens=800  # Slightly higher for dual queries
+                max_tokens=3000  # Slightly higher for dual queries
             )
             
             # Check for schema error first - only fail if NO schema found for ANY table
